@@ -1300,6 +1300,34 @@ WHERE pn.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
     )
 ORDER BY pn.nspname, pc.relname, cn.nspname, cc.relname;
 
+-- Parent columns are comparison metadata for managed partitions whose parent
+-- is not in the managed IR (for example, an extension member). Do not apply
+-- extension-member filters here: these rows never become managed tables.
+-- name: GetPartitionParentColumnsForSchema :many
+SELECT
+    cc.relname AS child_table,
+    a.attname AS column_name,
+    NOT (a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)) AS is_nullable,
+    ge.column_default
+FROM pg_catalog.pg_inherits inh
+JOIN pg_catalog.pg_class cc ON cc.oid = inh.inhrelid
+JOIN pg_catalog.pg_namespace cn ON cn.oid = cc.relnamespace
+JOIN pg_catalog.pg_attribute a ON a.attrelid = inh.inhparent
+JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+LEFT JOIN LATERAL (
+    SELECT
+        set_config('search_path', 'pg_catalog', true) AS dummy,
+        CASE WHEN a.attgenerated IN ('s', 'v') THEN NULL
+             ELSE pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+        END AS column_default
+) ge ON true
+WHERE cn.nspname = $1
+    AND cc.relispartition
+    AND a.attnum > 0
+    AND NOT a.attisdropped
+ORDER BY cc.relname, a.attnum;
+
 
 -- GetConstraintsForSchema retrieves all table constraints for a specific schema
 -- name: GetConstraintsForSchema :many

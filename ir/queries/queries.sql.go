@@ -2421,6 +2421,70 @@ func (q *Queries) GetPartitionChildren(ctx context.Context) ([]GetPartitionChild
 	return items, nil
 }
 
+const getPartitionParentColumnsForSchema = `-- name: GetPartitionParentColumnsForSchema :many
+SELECT
+    cc.relname AS child_table,
+    a.attname AS column_name,
+    NOT (a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)) AS is_nullable,
+    ge.column_default
+FROM pg_catalog.pg_inherits inh
+JOIN pg_catalog.pg_class cc ON cc.oid = inh.inhrelid
+JOIN pg_catalog.pg_namespace cn ON cn.oid = cc.relnamespace
+JOIN pg_catalog.pg_attribute a ON a.attrelid = inh.inhparent
+JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+LEFT JOIN LATERAL (
+    SELECT
+        set_config('search_path', 'pg_catalog', true) AS dummy,
+        CASE WHEN a.attgenerated IN ('s', 'v') THEN NULL
+             ELSE pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+        END AS column_default
+) ge ON true
+WHERE cn.nspname = $1
+    AND cc.relispartition
+    AND a.attnum > 0
+    AND NOT a.attisdropped
+ORDER BY cc.relname, a.attnum
+`
+
+type GetPartitionParentColumnsForSchemaRow struct {
+	ChildTable    string         `db:"child_table" json:"child_table"`
+	ColumnName    string         `db:"column_name" json:"column_name"`
+	IsNullable    sql.NullBool   `db:"is_nullable" json:"is_nullable"`
+	ColumnDefault sql.NullString `db:"column_default" json:"column_default"`
+}
+
+// Parent columns are comparison metadata for managed partitions whose parent
+// is not in the managed IR (for example, an extension member). Do not apply
+// extension-member filters here: these rows never become managed tables.
+func (q *Queries) GetPartitionParentColumnsForSchema(ctx context.Context, nspname string) ([]GetPartitionParentColumnsForSchemaRow, error) {
+	rows, err := q.db.QueryContext(ctx, getPartitionParentColumnsForSchema, nspname)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetPartitionParentColumnsForSchemaRow
+	for rows.Next() {
+		var i GetPartitionParentColumnsForSchemaRow
+		if err := rows.Scan(
+			&i.ChildTable,
+			&i.ColumnName,
+			&i.IsNullable,
+			&i.ColumnDefault,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getPartitionedTablesForSchema = `-- name: GetPartitionedTablesForSchema :many
 SELECT 
     n.nspname AS table_schema,
